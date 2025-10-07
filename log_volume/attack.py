@@ -308,7 +308,7 @@ def build_subset_loader_from_mask(orig_loader, mask, batch_size=128):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10", "mnist"])
-    p.add_argument("--dataset-root", type=str, default="/home/ethanrao/MIA_LDM/pytorch-diffusion/datasets")
+    p.add_argument("--dataset-root", type=str, default="/home/ethanrao/MIA_LDM/data")
     p.add_argument("--split-file", type=str, required=True)
     p.add_argument("--vae-ckpt", type=str, required=True)
     p.add_argument("--unet-ckpt", type=str, required=True)
