@@ -96,12 +96,12 @@ python main.py \
   --skip_vqvae --skip_ldm_vq
 
 
-python attack.py --dataset mnist \
-  --ae_base 64 \
-  --unet_model_ch 64 \
-  --unet_channel_mult 1 2 2 \
-  --img_size 32 \
-  --split_file /home/ethanrao/MIA_LDM/data/mnist_mia_split.npz \
-  --dataset_root /home/ethanrao/MIA_LDM/data \
-  --out_dir /banana/ethan/MIA_LDM_data/MNIST_KL_sweep/1e_3 \
-  --probe_min_t 0 --probe_max_t 300 --probe_step 10
+# python attack.py --dataset mnist \
+#   --ae_base 64 \
+#   --unet_model_ch 64 \
+#   --unet_channel_mult 1 2 2 \
+#   --img_size 32 \
+#   --split_file /home/ethanrao/MIA_LDM/data/mnist_mia_split.npz \
+#   --dataset_root /home/ethanrao/MIA_LDM/data \
+#   --out_dir /banana/ethan/MIA_LDM_data/MNIST_KL_sweep/1e_3 \
+#   --probe_min_t 0 --probe_max_t 300 --probe_step 10
