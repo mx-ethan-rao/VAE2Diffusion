@@ -269,37 +269,37 @@ def probe_unet_masked(unet: UNetCompVis,
 
     # contrib_train = contrib_train - contrib_train.min(axis=1, keepdims=True)
     # contrib_val   = contrib_val   - contrib_val.min(axis=1, keepdims=True)
-    # # Per-sample percentile thresholds; drop the lowest 'drop_percent' percent of dims
-    # thr_train = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
-    # thr_val   = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
+    # Per-sample percentile thresholds; drop the lowest 'drop_percent' percent of dims
+    thr_train = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
+    thr_val   = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
 
-    # mask_train = (contrib_train > thr_train)  # True for kept dims
-    # mask_val   = (contrib_val > thr_val)
+    mask_train = (contrib_train > thr_train)  # True for kept dims
+    mask_val   = (contrib_val > thr_val)
     # contrib_train[~mask_train] = 0.0
     # contrib_val[~mask_val] = 0.0
     # mask_train = contrib_train
     # mask_val = contrib_val
 
     # Softmax weighting with temperature
-    temperature = 1.0  # e.g. 0.5 or 1.0
+    # temperature = 1.0  # e.g. 0.5 or 1.0
 
-    # Stable exponentiation: subtract per-sample max
-    exp_train = np.exp((contrib_train) / temperature)
-    exp_val   = np.exp((contrib_val) / temperature)
+    # # Stable exponentiation: subtract per-sample max
+    # exp_train = np.exp((contrib_train) / temperature)
+    # exp_val   = np.exp((contrib_val) / temperature)
 
-    # Normalize so weights sum to 1 per sample
-    w_train = exp_train / (exp_train.sum(axis=1, keepdims=True) + 1e-12)
-    w_val   = exp_val   / (exp_val.sum(axis=1, keepdims=True) + 1e-12)
+    # # Normalize so weights sum to 1 per sample
+    # w_train = exp_train / (exp_train.sum(axis=1, keepdims=True) + 1e-12)
+    # w_val   = exp_val   / (exp_val.sum(axis=1, keepdims=True) + 1e-12)
 
-    # # Optional: drop the lowest X% weights (keep high contributors)
-    thr_train = np.percentile(w_train, drop_percent, axis=1, keepdims=True)
-    thr_val   = np.percentile(w_val,   drop_percent, axis=1, keepdims=True)
-    w_train = np.where(w_train > thr_train, w_train, 0.0)
-    w_val   = np.where(w_val   > thr_val,   w_val,   0.0)
+    # # # Optional: drop the lowest X% weights (keep high contributors)
+    # # thr_train = np.percentile(w_train, drop_percent, axis=1, keepdims=True)
+    # # thr_val   = np.percentile(w_val,   drop_percent, axis=1, keepdims=True)
+    # # w_train = np.where(w_train > thr_train, w_train, 0.0)
+    # # w_val   = np.where(w_val   > thr_val,   w_val,   0.0)
 
-    # Renormalize after masking
-    mask_train = w_train / (w_train.sum(axis=1, keepdims=True) + 1e-12)
-    mask_val   = w_val   / (w_val.sum(axis=1, keepdims=True) + 1e-12)
+    # # Renormalize after masking
+    # mask_train = w_train / (w_train.sum(axis=1, keepdims=True) + 1e-12)
+    # mask_val   = w_val   / (w_val.sum(axis=1, keepdims=True) + 1e-12)
 
 
 
@@ -383,7 +383,7 @@ def parse_args():
     p.add_argument("--logvol", type=str, default="/home/ethanrao/MIA_LDM/data/logvols_cifar10_beta_1e_2.npz", required=False,
                    help=".npz produced by compute_logvol.py")
     p.add_argument("--perdim", type=str, required=True, help="Path to perdim_contribs.npz")
-    p.add_argument("--drop-percent", type=float, default=60.0,
+    p.add_argument("--drop-percent", type=float, default=30.0,
                    help="Percent of lowest per-dim contributions to drop per sample (0–100).")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--img-size", type=int, default=32)
