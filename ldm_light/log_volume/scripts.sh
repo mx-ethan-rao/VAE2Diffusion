@@ -32,17 +32,17 @@ python attack.py \
 
 python cal_per_dim_contri.py \
   --dataset cifar10 \
-  --split-file /banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz \
-  --vae-ckpt /banana/ethan/MIA_LDM_data/KL_sweep/1e_2/vae/vae_last.pt \
+  --split-file /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/CIFAR10_train_ratio0.5.npz \
+  --vae-ckpt /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/vae/vae_last.pt \
   --dataset-root /home/ethanrao/MIA_LDM/data \
-  --out /home/ethanrao/MIA_LDM/data/per_dim_cifar10_beta_1e_2.npz \
-  --device cuda
+  --out /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/per_dim_cifar10_beta_1e_2.npz \
+  --device cuda --n-mc 16
 
 python attack_per_dim.py \
   --dataset cifar10 \
-  --split-file /banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz \
-  --vae-ckpt /banana/ethan/MIA_LDM_data/KL_sweep/1e_2/vae/vae_last.pt \
-  --unet-ckpt /banana/ethan/MIA_LDM_data/KL_sweep/1e_2/ldm_vae/unet_last.pt \
+  --split-file /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/CIFAR10_train_ratio0.5.npz \
+  --vae-ckpt /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/vae/vae_last.pt \
+  --unet-ckpt /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/ldm_vae/unet_last.pt \
   --logvol /home/ethanrao/MIA_LDM/data/logvols_cifar10_beta_1e_2.npz \
   --perdim /home/ethanrao/MIA_LDM/data/per_dim_cifar10_beta_1e_2.npz \
   --device cuda \
