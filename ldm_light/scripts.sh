@@ -5,25 +5,25 @@ python attack.py --dataset cifar10 \
   --probe_min_t 0 --probe_max_t 300 --probe_step 10
 
 
-CUDA_VISIBLE_DEVICES=7 python main.py \
+CUDA_VISIBLE_DEVICES=4 python main.py \
   --dataset cifar10 \
   --dataset_root /home/ethanrao/MIA_LDM/data \
-  --split_file /banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz \
-  --out_dir /banana/ethan/MIA_LDM_data/KL_sweep/1e_2 \
+  --split_file /home/ethanrao/MIA_LDM/data/CIFAR10_train_ratio0.5.npz \
+  --out_dir /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2 \
   --kl_beta 1e-2 \
   --skip_vqvae \
   --skip_ldm_vq
   
 
 
-CUDA_VISIBLE_DEVICES=7 python main.py \
-  --dataset cifar10 \
-  --dataset_root /home/ethanrao/MIA_LDM/data \
-  --split_file /banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz \
-  --out_dir /banana/ethan/MIA_LDM_data/VQ_sweep/1.5 \
-  --vq_lambda 1.5 \
-  --skip_vae \
-  --skip_ldm_vae
+# CUDA_VISIBLE_DEVICES=7 python main.py \
+#   --dataset cifar10 \
+#   --dataset_root /home/ethanrao/MIA_LDM/data \
+#   --split_file /banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz \
+#   --out_dir /banana/ethan/MIA_LDM_data/VQ_sweep/1.5 \
+#   --vq_lambda 1.5 \
+#   --skip_vae \
+#   --skip_ldm_vae
 
 python cal_recon_loss.py --dataset cifar10 \
   --dataset_root /home/ethanrao/MIA_LDM/data \
@@ -92,7 +92,7 @@ python main.py \
   --dataset mnist \
   --dataset_root /home/ethanrao/MIA_LDM/data \
   --kl_beta 1e-2 \
-  --out_dir /banana/ethan/MIA_LDM_data/MNIST_KL_sweep/1e_2 \
+  --out_dir /data/mingxing/tmp/MNIST/KL_sweep/1e_2 \
   --skip_vqvae --skip_ldm_vq
 
 

@@ -465,7 +465,7 @@ def main():
 
     elif args.grouping == "quartiles":
         all_logv = np.concatenate([logv_train, logv_val], axis=0)
-        q25, q50, q75 = np.percentile(all_logv, [10, 50, 90])
+        q25, q50, q75 = np.percentile(all_logv, [25, 50, 75])
         def assign_bin(vals):
             return (vals <= q25), ((vals > q25) & (vals <= q50)), ((vals > q50) & (vals <= q75)), (vals > q75)
         t_q1, t_q2, t_q3, t_q4 = assign_bin(logv_train)
