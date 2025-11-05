@@ -8,7 +8,7 @@ python attack.py --dataset cifar10 \
 CUDA_VISIBLE_DEVICES=4 python main.py \
   --dataset cifar10 \
   --dataset_root /home/ethanrao/MIA_LDM/data \
-  --split_file /home/ethanrao/MIA_LDM/data/CIFAR10_train_ratio0.5.npz \
+  --split_file /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/CIFAR10_train_ratio0.5.npz \
   --out_dir /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2 \
   --kl_beta 1e-2 \
   --skip_vqvae \

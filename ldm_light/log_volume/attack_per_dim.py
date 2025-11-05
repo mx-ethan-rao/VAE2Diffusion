@@ -256,12 +256,39 @@ def probe_unet_masked(unet: UNetCompVis,
                       drop_percent: float = 10.0,
                       probe_min_t=0,
                       probe_max_t=300,
-                      probe_step=10):
+                      probe_step=10,
+                      random_drop: bool = False):
     """
     Same probing as original, but the attack statistic sums over only the top (100 - drop_percent)%
     per-dimension contributions per-sample, using masks derived from contrib_* arrays.
     """
     unet.eval()
+    print(f"drop_percent={drop_percent}")
+
+    if random_drop:
+        # --- random baseline: random drop same percentage ---
+        mask_train = np.ones_like(contrib_train, dtype=np.float32)
+        num_drop = int(mask_train.shape[1] * drop_percent / 100.0)
+        for i in range(mask_train.shape[0]):
+            drop_idx = np.random.choice(mask_train.shape[1], num_drop, replace=False)
+            mask_train[i, drop_idx] = 0.0
+
+        mask_val = np.ones_like(contrib_val, dtype=np.float32)
+        num_drop = int(mask_val.shape[1] * drop_percent / 100.0)
+        for i in range(mask_val.shape[0]):
+            drop_idx = np.random.choice(mask_val.shape[1], num_drop, replace=False)
+            mask_val[i, drop_idx] = 0.0
+    else:
+        if drop_percent > 0.0:
+            # percentile per row -> threshold shape (B, 1)
+            thr = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
+            mask_train = (contrib_train > thr).astype(np.float32)  # keep=1, drop=0
+            thr = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
+            mask_val = (contrib_val > thr).astype(np.float32)  # keep=1, drop=0
+
+        else:
+            mask_train = np.ones_like(contrib_train, dtype=np.float32)
+            mask_val = np.ones_like(contrib_val, dtype=np.float32)
 
     # # Flatten per-dim contributions to match pred.flatten(1) ordering
     # contrib_train = contrib_train.reshape(contrib_train.shape[0], -1)
@@ -270,11 +297,11 @@ def probe_unet_masked(unet: UNetCompVis,
     # contrib_train = contrib_train - contrib_train.min(axis=1, keepdims=True)
     # contrib_val   = contrib_val   - contrib_val.min(axis=1, keepdims=True)
     # Per-sample percentile thresholds; drop the lowest 'drop_percent' percent of dims
-    thr_train = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
-    thr_val   = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
+    # thr_train = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
+    # thr_val   = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
 
-    mask_train = (contrib_train > thr_train)  # True for kept dims
-    mask_val   = (contrib_val > thr_val)
+    # mask_train = (contrib_train > thr_train)  # True for kept dims
+    # mask_val   = (contrib_val > thr_val)
     # contrib_train[~mask_train] = 0.0
     # contrib_val[~mask_val] = 0.0
     # mask_train = contrib_train
@@ -383,8 +410,10 @@ def parse_args():
     p.add_argument("--logvol", type=str, default="/home/ethanrao/MIA_LDM/data/logvols_cifar10_beta_1e_2.npz", required=False,
                    help=".npz produced by compute_logvol.py")
     p.add_argument("--perdim", type=str, required=True, help="Path to perdim_contribs.npz")
-    p.add_argument("--drop-percent", type=float, default=30.0,
+    p.add_argument("--drop-percent", type=float, default=40.0,
                    help="Percent of lowest per-dim contributions to drop per sample (0–100).")
+    p.add_argument('--random_drop', action='store_true',
+                        help='if set, randomly drop drop_percent%% of dimensions as a baseline')
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--img-size", type=int, default=32)
     p.add_argument("--in-channels", type=int, default=3)
@@ -397,7 +426,9 @@ def parse_args():
     p.add_argument("--probe-step", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--grouping", type=str, default="median",
-                   choices=["median", "quartiles", "random_split"], help="Grouping strategy")
+                   choices=["median", "quartiles", "random"], help="Grouping strategy")
+    p.add_argument("--random_groups", type=int, default=2)
+    
     return p.parse_args()
 
 def main():
@@ -472,29 +503,73 @@ def main():
         v_q1, v_q2, v_q3, v_q4 = assign_bin(logv_val)
         groups = [
             ("Q1", t_q1, v_q1),
-            # ("Q2", t_q2, v_q2),
-            # ("Q3", t_q3, v_q3),
+            ("Q2", t_q2, v_q2),
+            ("Q3", t_q3, v_q3),
             ("Q4", t_q4, v_q4),
         ]
         print(f"Quartiles: {q25:.6f}, {q50:.6f}, {q75:.6f}")
 
-    elif args.grouping == "random_split":
+    elif args.grouping == "random":
         rng = np.random.RandomState(args.seed)
         Ntr = logv_train.shape[0]
         Nval = logv_val.shape[0]
+
+        # Generate random permutations
         perm_tr = rng.permutation(Ntr)
         perm_val = rng.permutation(Nval)
-        half_tr = Ntr // 2
-        half_val = Nval // 2
-        train_mask_r1 = np.zeros(Ntr, dtype=bool); train_mask_r1[perm_tr[:half_tr]] = True
-        train_mask_r2 = ~train_mask_r1
-        val_mask_r1 = np.zeros(Nval, dtype=bool); val_mask_r1[perm_val[:half_val]] = True
-        val_mask_r2 = ~val_mask_r1
+
+        # Determine how many groups to create
+        n_groups = args.random_groups
+
+        # Compute roughly equal group sizes
+        sizes_tr = np.full(n_groups, Ntr // n_groups, dtype=int)
+        sizes_tr[: Ntr % n_groups] += 1  # distribute remainder
+        sizes_val = np.full(n_groups, Nval // n_groups, dtype=int)
+        sizes_val[: Nval % n_groups] += 1
+
+        # Split indices accordingly
+        train_masks = []
+        val_masks = []
+        start_tr = start_val = 0
+        for i in range(n_groups):
+            end_tr = start_tr + sizes_tr[i]
+            end_val = start_val + sizes_val[i]
+
+            mask_tr = np.zeros(Ntr, dtype=bool)
+            mask_tr[perm_tr[start_tr:end_tr]] = True
+
+            mask_val = np.zeros(Nval, dtype=bool)
+            mask_val[perm_val[start_val:end_val]] = True
+
+            train_masks.append(mask_tr)
+            val_masks.append(mask_val)
+
+            start_tr, start_val = end_tr, end_val
+
+        # Pack into groups list
         groups = [
-            ("random1", train_mask_r1, val_mask_r1),
-            ("random2", train_mask_r2, val_mask_r2),
+            (f"random{i+1}", train_masks[i], val_masks[i])
+            for i in range(n_groups)
         ]
-        print("Random split created")
+
+        print(f"Random split created with {n_groups} groups")
+
+        # rng = np.random.RandomState(args.seed)
+        # Ntr = logv_train.shape[0]
+        # Nval = logv_val.shape[0]
+        # perm_tr = rng.permutation(Ntr)
+        # perm_val = rng.permutation(Nval)
+        # half_tr = Ntr // 2
+        # half_val = Nval // 2
+        # train_mask_r1 = np.zeros(Ntr, dtype=bool); train_mask_r1[perm_tr[:half_tr]] = True
+        # train_mask_r2 = ~train_mask_r1
+        # val_mask_r1 = np.zeros(Nval, dtype=bool); val_mask_r1[perm_val[:half_val]] = True
+        # val_mask_r2 = ~val_mask_r1
+        # groups = [
+        #     ("random1", train_mask_r1, val_mask_r1),
+        #     ("random2", train_mask_r2, val_mask_r2),
+        # ]
+        # print("Random split created")
 
     else:
         raise ValueError("Unknown grouping")
@@ -528,7 +603,8 @@ def main():
             drop_percent=args.drop_percent,
             probe_min_t=args.probe_min_t,
             probe_max_t=args.probe_max_t,
-            probe_step=args.probe_step
+            probe_step=args.probe_step,
+            random_drop=args.random_drop,
         )
 
     print("All probes done.")

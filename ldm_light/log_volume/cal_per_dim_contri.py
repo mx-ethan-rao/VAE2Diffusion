@@ -228,7 +228,7 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--max-samples", type=int, default=None)
-    p.add_argument("--n-mc", type=int, default=512, help="MC samples for diag(J^T J) estimation")
+    p.add_argument("--n-mc", type=int, default=8, help="MC samples for diag(J^T J) estimation")
     p.add_argument("--seed", type=int, default=2025)
     return p.parse_args()
 
