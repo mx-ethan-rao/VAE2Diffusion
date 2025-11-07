@@ -172,7 +172,7 @@ def load_pipeline(ckpt_path, device='cuda:0'):
 # Attack logic with per-dim drop mask
 # ======================================================
 
-def perform_attack(pipe, dataloader, attacker, unconditional, prefix, vae, per_dim_logcontrib, drop_percent, n_mc):
+def perform_attack(pipe, dataloader, attacker, unconditional, prefix, vae, per_dim_logcontrib, drop_percent, n_mc, random_drop = False):
     SCALE = 0.18215
     weight_dtype = torch.float32
     scores = []
@@ -187,17 +187,29 @@ def perform_attack(pipe, dataloader, attacker, unconditional, prefix, vae, per_d
         encoder_hidden_states = None if unconditional else text_encoder(input_ids)[0]
 
         # Per-sample drop mask
-        if drop_percent > 0.0:
-            bsize = latents.shape[0]
-            contrib_batch = per_dim_logcontrib[batch_idx * bsize: batch_idx * bsize + bsize]
-            thr = np.percentile(contrib_batch, drop_percent, axis=1, keepdims=True)
-            mask_np = (contrib_batch > thr).astype(np.float32)
-            mask = torch.from_numpy(mask_np).to(latents.device)
-        else:
+        if random_drop:
+            # --- random baseline: random drop same percentage ---
             bsize = latents.shape[0]
             contrib_batch = per_dim_logcontrib[batch_idx * bsize: batch_idx * bsize + bsize]
             mask_np = np.ones_like(contrib_batch, dtype=np.float32)
+            num_drop = int(mask_np.shape[1] * drop_percent / 100.0)
+            for i in range(mask_np.shape[0]):
+                drop_idx = np.random.choice(mask_np.shape[1], num_drop, replace=False)
+                mask_np[i, drop_idx] = 0.0
             mask = torch.from_numpy(mask_np).to(latents.device)
+            
+        else:
+            if drop_percent > 0.0:
+                bsize = latents.shape[0]
+                contrib_batch = per_dim_logcontrib[batch_idx * bsize: batch_idx * bsize + bsize]
+                thr = np.percentile(contrib_batch, drop_percent, axis=1, keepdims=True)
+                mask_np = (contrib_batch > thr).astype(np.float32)
+                mask = torch.from_numpy(mask_np).to(latents.device)
+            else:
+                bsize = latents.shape[0]
+                contrib_batch = per_dim_logcontrib[batch_idx * bsize: batch_idx * bsize + bsize]
+                mask_np = np.ones_like(contrib_batch, dtype=np.float32)
+                mask = torch.from_numpy(mask_np).to(latents.device)
 
         # Mask latent
         # latents = latents * mask
@@ -269,9 +281,9 @@ def main(args):
         print(f"[Saved] per-dim contributions -> {args.perdim_npz}")
 
     member_scores = perform_attack(pipe, train_loader, args.attacker, args.unconditional,
-                                   'member', vae, member_per_dim_logcontrib, args.drop_percent, args.n_mc)
+                                   'member', vae, member_per_dim_logcontrib, args.drop_percent, args.n_mc, args.random_drop)
     nonmember_scores = perform_attack(pipe, test_loader, args.attacker, args.unconditional,
-                                      'nonmember', vae, heldout_per_dim_logcontrib, args.drop_percent, args.n_mc)
+                                      'nonmember', vae, heldout_per_dim_logcontrib, args.drop_percent, args.n_mc, args.random_drop)
 
     # Metrics
     auc_mtr, roc_mtr = BinaryAUROC().to(args.device), BinaryROC().to(args.device)
@@ -312,6 +324,8 @@ if __name__ == '__main__':
                         help='path to save/load per-dim contributions')
     parser.add_argument('--drop_percent', type=float, default=40.0,
                         help='percentage of lowest per-dim contributions to drop per sample')
+    parser.add_argument('--random_drop', action='store_true',
+                    help='if set, randomly drop drop_percent%% of dimensions as a baseline')
     parser.add_argument('--n_mc', type=int, default=8, help='number of Hutchinson probes for per-dim estimation')
     args = parser.parse_args()
 

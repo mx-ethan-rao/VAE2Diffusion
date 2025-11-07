@@ -13,7 +13,11 @@ accelerate launch --multi_gpu main.py   --data_root /data/mingxing/IMNET100K/   
 
 # python attack.py --data_root /data/mingxing/IMNET100K/ --out_dir /data/mingxing/tmp/IMNET100K/runs/ldm_imnet256_10k
 
-python cal_pullback.py --data_root /data/mingxing/IMNET100K/ --out_dir /data/mingxing/tmp/IMNET100K/runs/ldm_imnet256_10k --out_npz /data/mingxing/tmp/IMNET100K/runs/ldm_imnet256_10k/imnetv1_10k_pullback.npz
+python cal_pullback.py \
+  --data_root /data/mingxing/IMNET100K/ \
+  --out_dir /data/mingxing/tmp/IMNET100K/runs/ldm_imnet256_10k \
+  --out_npz /data/mingxing/tmp/IMNET100K/runs/ldm_imnet256_10k/imnetv1_10k_pullback.npz \
+  --method fd
 
 
 python attack_by_group_advance.py \
