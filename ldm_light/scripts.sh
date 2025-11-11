@@ -61,12 +61,12 @@ python main_gan_percep.py \
 
 
 
-python main.py \
-  --split_file /banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz \
-  --out_dir outputs_ldm_toy_compvis \
-  --vae_ckpt outputs_ldm_toy_compvis/vae/vae_last.pt \
-  --unet_vae_ckpt outputs_ldm_toy_compvis/ldm_vae/unet_last.pt \
-  --skip_vqvae --skip_ldm_vq
+# python main.py \
+#   --split_file /banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz \
+#   --out_dir outputs_ldm_toy_compvis \
+#   --vae_ckpt outputs_ldm_toy_compvis/vae/vae_last.pt \
+#   --unet_vae_ckpt outputs_ldm_toy_compvis/ldm_vae/unet_last.pt \
+#   --skip_vqvae --skip_ldm_vq
 
 
 python sampler.py --out_dir outputs_ldm_toy_compvis --device cuda
@@ -83,10 +83,21 @@ python ldm_fid_from_attack.py \
 
 
 
+###############################celeba###################################################
+python main.py   \
+  --dataset celeba \
+  --dataset_root /home/ethanrao/MIA_LDM/VAE2Diffusion/data/celeba   \
+  --split_file /data/mingxing/tmp/CELEBA/KL_sweep/1e_3/CELEBA_train_ratio0.5.npz   \
+  --out_dir /data/mingxing/tmp/CELEBA/KL_sweep/1e_3 \
+  --img_size 64 \
+  --in_channels 3   --latent_channels 4 --ae_base 128 --kl_beta 1e-3   \
+  --unet_model_ch 224 --unet_channel_mult 1 2 3 4   \
+  --batch_size 256 --num_workers 8   \
+  --skip_vqvae --skip_ldm_vq --epochs_ldm 512
 
 
 
-  #####################################mnist###################################################
+#####################################mnist###################################################
 python main.py \
   --split_file /home/ethanrao/MIA_LDM/data/mnist_mia_split.npz \
   --dataset mnist \

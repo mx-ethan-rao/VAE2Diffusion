@@ -124,7 +124,7 @@ def load_pokemon_datasets():
 
 
 def load_flickr_datasets():
-    ds = load_from_disk('/data/mingxing/tmp/FLICKR/flickr30k_splits/')
+    ds = load_from_disk('/data/mingxing/tmp/FLICKR30K/flickr30k_splits/')
     train_dataset = ds['train'].with_transform(preprocess_train)
     test_dataset = ds['test'].with_transform(preprocess_train)
     train_dataloader = torch.utils.data.DataLoader(train_dataset, shuffle=False, batch_size=32, collate_fn=collate_fn)

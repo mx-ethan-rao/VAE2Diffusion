@@ -25,6 +25,35 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10
 from tqdm import tqdm
+from torch.utils.data import Dataset
+from PIL import Image
+import pandas as pd
+
+class CelebAKaggle(Dataset):
+    def __init__(self, root, split="train", transform=None):
+        self.root = root
+        self.img_dir = os.path.join(root, "img_align_celeba")
+        self.attr = pd.read_csv(os.path.join(root, "list_attr_celeba.csv"))
+        self.part = pd.read_csv(os.path.join(root, "list_eval_partition.csv"))
+        self.transform = transform
+        split_map = {"train": 0, "valid": 1, "test": 2, "all": None}
+        split_idx = split_map[split]
+        if split_idx is not None:
+            ids = self.part[self.part["partition"] == split_idx]["image_id"]
+            self.attr = self.attr[self.attr["image_id"].isin(ids)]
+        self.files = self.attr["image_id"].tolist()
+        self.attrs = self.attr.drop(columns=["image_id"]).astype("int32").values
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.img_dir, self.files[idx])
+        img = Image.open(img_path).convert("RGB")
+        target = torch.tensor(self.attrs[idx])
+        if self.transform:
+            img = self.transform(img)
+        return img, target
 
 # ----------------------------
 # Minimal model definitions (VAE)
@@ -103,9 +132,19 @@ class VAE(nn.Module):
 # Data helpers
 # ----------------------------
 def build_transforms(img_size: int, in_channels: int, dataset_name: str):
-    ops: List[transforms.Transform] = [transforms.Resize((img_size, img_size))]
-    if dataset_name.lower() == "mnist":
-        ops.append(transforms.Grayscale(num_output_channels=in_channels))
+    ds = dataset_name.lower()
+    ops: List[transforms.Transform] = []
+
+    if ds == "mnist":
+        ops += [transforms.Resize((img_size, img_size)),
+                transforms.Grayscale(num_output_channels=in_channels)]
+    elif ds == "celeba":
+        # Option 1 (recommended): center crop around face, then resize to 64
+        ops += [transforms.CenterCrop(140), transforms.Resize((img_size, img_size))]
+    else:
+        # cifar10 (already 32x32 but keep for flexibility)
+        ops += [transforms.Resize((img_size, img_size))]
+
     ops += [
         transforms.ToTensor(),
         transforms.Normalize([0.5] * in_channels, [0.5] * in_channels),
@@ -120,6 +159,8 @@ def build_dataloaders(dataset: str, root: str, split_file: str, img_size: int, i
         full_train = CIFAR10(root=root, train=True, download=True, transform=transform)
     elif ds_name == "mnist":
         full_train = MNIST(root=root, train=True, download=True, transform=transform)
+    elif ds_name == "celeba":
+        full_train = CelebAKaggle(root=root, split="train", transform=transform)
     else:
         raise ValueError(f"Unsupported dataset: {dataset}. Use 'cifar10' or 'mnist'.")
 
@@ -215,7 +256,7 @@ def compute_per_dim_contrib_decoder(
 # ----------------------------
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10", "mnist"])
+    p.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10", "mnist", "celeba"])
     p.add_argument("--dataset-root", type=str, default="pytorch-diffusion/datasets")
     p.add_argument("--split-file", type=str, required=True)
     p.add_argument("--vae-ckpt", type=str, required=True)

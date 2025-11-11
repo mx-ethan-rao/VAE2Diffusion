@@ -28,6 +28,7 @@ from typing import List
 from torch.utils.data import Dataset
 from PIL import Image
 import pandas as pd
+from tqdm import tqdm
 
 
 class CelebAKaggle(Dataset):
@@ -239,6 +240,7 @@ def build_transforms(img_size: int, in_channels: int, dataset_name: str):
                 transforms.Grayscale(num_output_channels=in_channels)]
     elif ds == "celeba":
         # Option 1 (recommended): center crop around face, then resize to 64
+        print(img_size)
         ops += [transforms.CenterCrop(140), transforms.Resize((img_size, img_size))]
     else:
         # cifar10 (already 32x32 but keep for flexibility)
@@ -286,7 +288,7 @@ def build_subset_loader_from_mask(orig_loader, mask, batch_size=128):
     return DataLoader(new_subset, batch_size=batch_size, shuffle=False, num_workers=orig_loader.num_workers, pin_memory=True)
 
 # ----------------------------
-# Probe function with per-dim masking
+# Probe function with per-dim masking (STREAMING)
 # ----------------------------
 def probe_unet_masked(unet: UNetCompVis,
                       lat_fn,
@@ -301,126 +303,91 @@ def probe_unet_masked(unet: UNetCompVis,
                       probe_step=10,
                       random_drop: bool = False):
     """
-    Same probing as original, but the attack statistic sums over only the top (100 - drop_percent)%
-    per-dimension contributions per-sample, using masks derived from contrib_* arrays.
+    Streaming version: encodes and probes one batch at a time. We no longer
+    precompute and store all latents. We also compute per-batch masks from
+    the provided contrib arrays in the same iteration order.
     """
     unet.eval()
     print(f"drop_percent={drop_percent}")
 
-    if random_drop:
-        # --- random baseline: random drop same percentage ---
-        mask_train = np.ones_like(contrib_train, dtype=np.float32)
-        num_drop = int(mask_train.shape[1] * drop_percent / 100.0)
-        for i in range(mask_train.shape[0]):
-            drop_idx = np.random.choice(mask_train.shape[1], num_drop, replace=False)
-            mask_train[i, drop_idx] = 0.0
-
-        mask_val = np.ones_like(contrib_val, dtype=np.float32)
-        num_drop = int(mask_val.shape[1] * drop_percent / 100.0)
-        for i in range(mask_val.shape[0]):
-            drop_idx = np.random.choice(mask_val.shape[1], num_drop, replace=False)
-            mask_val[i, drop_idx] = 0.0
-    else:
-        if drop_percent > 0.0:
-            # percentile per row -> threshold shape (B, 1)
-            thr = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
-            mask_train = (contrib_train > thr).astype(np.float32)  # keep=1, drop=0
-            thr = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
-            mask_val = (contrib_val > thr).astype(np.float32)  # keep=1, drop=0
-
-        else:
-            mask_train = np.ones_like(contrib_train, dtype=np.float32)
-            mask_val = np.ones_like(contrib_val, dtype=np.float32)
-
-    # # Flatten per-dim contributions to match pred.flatten(1) ordering
-    # contrib_train = contrib_train.reshape(contrib_train.shape[0], -1)
-    # contrib_val   = contrib_val.reshape(contrib_val.shape[0], -1)
-
-    # contrib_train = contrib_train - contrib_train.min(axis=1, keepdims=True)
-    # contrib_val   = contrib_val   - contrib_val.min(axis=1, keepdims=True)
-    # Per-sample percentile thresholds; drop the lowest 'drop_percent' percent of dims
-    # thr_train = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
-    # thr_val   = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
-
-    # mask_train = (contrib_train > thr_train)  # True for kept dims
-    # mask_val   = (contrib_val > thr_val)
-    # contrib_train[~mask_train] = 0.0
-    # contrib_val[~mask_val] = 0.0
-    # mask_train = contrib_train
-    # mask_val = contrib_val
-
-    # Softmax weighting with temperature
-    # temperature = 1.0  # e.g. 0.5 or 1.0
-
-    # # Stable exponentiation: subtract per-sample max
-    # exp_train = np.exp((contrib_train) / temperature)
-    # exp_val   = np.exp((contrib_val) / temperature)
-
-    # # Normalize so weights sum to 1 per sample
-    # w_train = exp_train / (exp_train.sum(axis=1, keepdims=True) + 1e-12)
-    # w_val   = exp_val   / (exp_val.sum(axis=1, keepdims=True) + 1e-12)
-
-    # # # Optional: drop the lowest X% weights (keep high contributors)
-    # # thr_train = np.percentile(w_train, drop_percent, axis=1, keepdims=True)
-    # # thr_val   = np.percentile(w_val,   drop_percent, axis=1, keepdims=True)
-    # # w_train = np.where(w_train > thr_train, w_train, 0.0)
-    # # w_val   = np.where(w_val   > thr_val,   w_val,   0.0)
-
-    # # Renormalize after masking
-    # mask_train = w_train / (w_train.sum(axis=1, keepdims=True) + 1e-12)
-    # mask_val   = w_val   / (w_val.sum(axis=1, keepdims=True) + 1e-12)
-
-
-
-
-
-
-    # Collect latents deterministically to align with contrib arrays
-    Zm_list, Zn_list = [], []
-    for m, _ in train_loader:
-        m = m.to(device)
-        with torch.no_grad():
-            Zm_list.append(lat_fn(m))
-    Zm = torch.cat(Zm_list, dim=0)
-
-
-    for (n, _) in val_loader:
-        n = n.to(device)
-        with torch.no_grad():
-            Zn_list.append(lat_fn(n))
-    Zn = torch.cat(Zn_list, dim=0)
-
-    # Move masks to device
-    mask_m = torch.from_numpy(mask_train).to(device).float()
-    mask_n = torch.from_numpy(mask_val).to(device).float()
-
-    # Metrics
     probe_ts = list(range(probe_min_t, probe_max_t, probe_step))
     auc_mtr, roc_mtr = BinaryAUROC().to(device), BinaryROC().to(device)
     auroc_k, tpr1_k, asr_k = [], [], []
 
-    for tval in probe_ts:
-        t_m = torch.full((Zm.size(0),), tval, device=device, dtype=torch.long)
-        t_n = torch.full((Zn.size(0),), tval, device=device, dtype=torch.long)
-        with torch.no_grad():
-            pred_m = unet(Zm, t_m)
-            pred_n = unet(Zn, t_n)
+    # Helper to build per-batch masks given contrib batch (numpy array)
+    def build_mask_batch(contrib_batch: np.ndarray, random_drop: bool) -> np.ndarray:
+        if drop_percent <= 0.0:
+            return np.ones_like(contrib_batch, dtype=np.float32)
 
-        # Apply per-dimension masks before summing
-        pred_m_f = pred_m.flatten(1)
-        pred_n_f = pred_n.flatten(1)
-        sm = ((pred_m_f.abs() ** 4) * mask_m).sum(dim=-1)
-        sn = ((pred_n_f.abs() ** 4) * mask_n).sum(dim=-1)
+        if random_drop:
+            B, D = contrib_batch.shape
+            mask = np.ones((B, D), dtype=np.float32)
+            num_drop = int(D * drop_percent / 100.0)
+            if num_drop > 0:
+                for i in range(B):
+                    drop_idx = np.random.choice(D, num_drop, replace=False)
+                    mask[i, drop_idx] = 0.0
+            return mask
+
+        # percentile per row -> keep high contributors
+        thr = np.percentile(contrib_batch, drop_percent, axis=1, keepdims=True)
+        return (contrib_batch > thr).astype(np.float32)
+
+    # For each time step, stream over loaders and accumulate only scalar batch scores
+    for tval in tqdm(probe_ts, desc="Probing time steps"):
+        scores_all = []
+        labels_all = []
+
+        # Stream over members
+        offset = 0
+        for m, _ in train_loader:
+            bsz = m.size(0)
+            contrib_b = contrib_train[offset:offset + bsz]   # numpy slice aligned to loader order
+            offset += bsz
+
+            m = m.to(device, non_blocking=True)
+            with torch.no_grad():
+                Zm = lat_fn(m)
+                t_m = torch.full((Zm.size(0),), tval, device=device, dtype=torch.long)
+                pred_m = unet(Zm, t_m)
+
+            pred_m_f = pred_m.flatten(1)
+            # Per-batch mask
+            mask_m_b = torch.from_numpy(build_mask_batch(contrib_b, random_drop)).to(device).float()
+            sm = ((pred_m_f.abs() ** 4) * mask_m_b).sum(dim=-1)  # (B,)
+
+            scores_all.append(sm.detach().cpu())
+            labels_all.append(torch.zeros_like(sm, dtype=torch.long).cpu())
+
+        # Stream over held-out
+        offset = 0
+        for n, _ in val_loader:
+            bsz = n.size(0)
+            contrib_b = contrib_val[offset:offset + bsz]
+            offset += bsz
+
+            n = n.to(device, non_blocking=True)
+            with torch.no_grad():
+                Zn = lat_fn(n)
+                t_n = torch.full((Zn.size(0),), tval, device=device, dtype=torch.long)
+                pred_n = unet(Zn, t_n)
+
+            pred_n_f = pred_n.flatten(1)
+            mask_n_b = torch.from_numpy(build_mask_batch(contrib_b, random_drop)).to(device).float()
+            sn = ((pred_n_f.abs() ** 4) * mask_n_b).sum(dim=-1)
+
+            scores_all.append(sn.detach().cpu())
+            labels_all.append(torch.ones_like(sn, dtype=torch.long).cpu())
+
+        # Concatenate and normalize across both classes for this t
+        scores = torch.cat(scores_all, dim=0).to(device)
+        labels = torch.cat(labels_all, dim=0).to(device)
 
         # Normalize
-        scale = torch.max(sm.max(), sn.max()).clamp(min=1e-12)
-        sm, sn = sm / scale, sn / scale
+        scale = scores.max().clamp(min=1e-12)
+        scores = scores / scale
 
-        scores = torch.cat([sm, sn])
-        labels = torch.cat([torch.zeros_like(sm), torch.ones_like(sn)]).long()
-        # scores = torch.cat([1 - sm, 1 - sn])
-        # labels = torch.cat([torch.ones_like(sm), torch.zeros_like(sn)]).long()
-
+        # Metrics for this t
         auroc = auc_mtr(scores, labels).item()
         fpr, tpr, _ = roc_mtr(scores, labels)
         idx = (fpr < 0.01).sum() - 1
@@ -447,7 +414,7 @@ def probe_unet_masked(unet: UNetCompVis,
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10", "mnist", "celeba"])
-    p.add_argument("--dataset-root", type=str, default="/home/ethanrao/MIA_LDM/VAE2Diffusion/data")
+    p.add_argument("--dataset-root", type=str, default="/home/ethanrao/MIA_LDM/data")
     p.add_argument("--split-file", type=str, default="/banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz", required=False)
     p.add_argument("--vae-ckpt", type=str, default="/banana/ethan/MIA_LDM_data/KL_sweep/1e_2/vae/vae_last.pt", required=False)
     p.add_argument("--unet-ckpt", type=str, default="/banana/ethan/MIA_LDM_data/KL_sweep/1e_2/ldm_vae/unet_last.pt", required=False)
@@ -510,13 +477,11 @@ def main():
     val_indices = data["val_indices"] if "val_indices" in data.files else None
     print(f"Loaded logvols: train:{logv_train.shape} val:{logv_val.shape}")
 
+
     # load per-dimension contributions (coordinate-basis)
     perdim = np.load(args.perdim)
     contrib_train = perdim["per_dim_logcontrib_train"]
     contrib_val = perdim["per_dim_logcontrib_val"]
-    # basic sanity check on lengths
-    if contrib_train.shape[0] != logv_train.shape[0] or contrib_val.shape[0] != logv_val.shape[0]:
-        raise RuntimeError("perdim_contribs and logvol shapes do not align with train/val counts.")
 
     # load models
     vae = VAE(in_ch=args.in_channels, latent_ch=args.latent_channels, base=args.ae_base).to(device)
@@ -530,7 +495,7 @@ def main():
     unet.eval()
     print("Loaded UNet ckpt")
 
-    # ---- grouping (identical to original) ----
+    # ---- grouping (identical to original) ---
     if args.grouping == "median":
         all_logv = np.concatenate([logv_train, logv_val], axis=0)
         thr = np.median(all_logv)
@@ -561,8 +526,8 @@ def main():
 
     elif args.grouping == "random":
         rng = np.random.RandomState(args.seed)
-        Ntr = logv_train.shape[0]
-        Nval = logv_val.shape[0]
+        Ntr = contrib_train.shape[0]
+        Nval = contrib_val.shape[0]
 
         # Generate random permutations
         perm_tr = rng.permutation(Ntr)
@@ -604,23 +569,6 @@ def main():
 
         print(f"Random split created with {n_groups} groups")
 
-        # rng = np.random.RandomState(args.seed)
-        # Ntr = logv_train.shape[0]
-        # Nval = logv_val.shape[0]
-        # perm_tr = rng.permutation(Ntr)
-        # perm_val = rng.permutation(Nval)
-        # half_tr = Ntr // 2
-        # half_val = Nval // 2
-        # train_mask_r1 = np.zeros(Ntr, dtype=bool); train_mask_r1[perm_tr[:half_tr]] = True
-        # train_mask_r2 = ~train_mask_r1
-        # val_mask_r1 = np.zeros(Nval, dtype=bool); val_mask_r1[perm_val[:half_val]] = True
-        # val_mask_r2 = ~val_mask_r1
-        # groups = [
-        #     ("random1", train_mask_r1, val_mask_r1),
-        #     ("random2", train_mask_r2, val_mask_r2),
-        # ]
-        # print("Random split created")
-
     else:
         raise ValueError("Unknown grouping")
 
@@ -637,8 +585,6 @@ def main():
         va_loader = build_subset_loader_from_mask(val_loader, va_mask, batch_size=args.batch_size)
 
         # slice per-dim contrib arrays to the same subset **order as the loaders**.
-        # Since loaders iterate datasets in index order (shuffle=False), and contrib_* rows
-        # are aligned with those same indices, we can directly mask them here:
         contrib_train_group = contrib_train[tr_mask]
         contrib_val_group = contrib_val[va_mask]
 

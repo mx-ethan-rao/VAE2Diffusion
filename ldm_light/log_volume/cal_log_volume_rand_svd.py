@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd.functional import jacobian
+from torch.autograd.functional import jacobian, jvp  # <- jvp added
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10
@@ -175,36 +175,93 @@ def build_dataloaders(dataset: str, root: str, split_file: str, img_size: int, i
     return train_loader, val_loader, mia_train_idxs, mia_val_idxs
 
 # ----------------------------
-# Jacobian / log-volume helpers
+# Matrix-free Jacobian primitives (JVP / VJP) and randomized SVD
 # ----------------------------
-def topk_singular_values_power(J: torch.Tensor, k=8, n_iter=10):
+def J_times_V_jvp(decoder_mean, z_flat, V):
+    """ Y = J(z) @ V via JVP; Shapes: z_flat(d,), V(d,r) -> Y(M,r). """
+    z0 = z_flat.detach().requires_grad_(True)
+    r = V.shape[1]
+    cols = []
+    for j in range(r):
+        _, Jv = jvp(lambda zz: decoder_mean(zz), (z0,), (V[:, j],))
+        cols.append(Jv.detach())
+    return torch.stack(cols, dim=1)  # (M, r)
+
+def JT_times_Y_vjp(decoder_mean, z_flat, Y):
+    """ G = J(z)^T @ Y using VJP; Y(M,r) -> G(d,r). """
+    z0 = z_flat.detach().requires_grad_(True)
+    mu = decoder_mean(z0)  # (M,)
+    r = Y.shape[1]
+    cols = []
+    for j in range(r):
+        y = Y[:, j]
+        s = torch.dot(mu, y)  # scalar
+        (grad_z,) = torch.autograd.grad(s, z0, retain_graph=(j < r - 1), allow_unused=False)
+        cols.append(grad_z.detach())
+    return torch.stack(cols, dim=1)  # (d, r)
+
+def topk_svals_randomized(
+    decoder_mean,
+    z_like: torch.Tensor,
+    k: int,
+    oversample: int = 10,
+    power: int = 1,
+    use_jvp: bool = True,
+    eps_fd: float = 1e-3,
+) -> torch.Tensor:
     """
-    Estimate top-k singular values of J (shape M x d) using randomized power iterations on J^T J.
-    Returns singular values in descending order (k,).
+    Randomized SVD for J to get top-k singular values with ~2*(k+oversample) applications.
+    Uses JVP/VJP primitives (preferred) or finite differences for J·v.
     """
-    device = J.device
-    d = J.shape[1]
-    # random initial vectors (d x k)
-    Q = torch.randn(d, k, device=device)
-    for _ in range(n_iter):
-        Z = J @ Q        # (M x k)
-        Q = J.T @ Z      # (d x k)  -> multiply by J^T J implicitly
-        Q, _ = torch.linalg.qr(Q)  # orthonormalize
-    # Rayleigh matrix
-    Z = J @ Q          # (M x k)
-    B = Q.T @ (J.T @ Z)  # (k x k)
-    eigvals = torch.linalg.eigvalsh(B)
-    eigvals = torch.sort(eigvals.real)[0].flip(0)
-    eigvals = eigvals.clamp(min=1e-12)
-    svals = eigvals.sqrt()
+    device = z_like.device
+    z_flat = z_like.reshape(-1).detach().clone().requires_grad_(True)
+    d = z_flat.numel()
+    l = int(min(k + oversample, d))
+    if l <= 0:
+        return torch.zeros(0, device=device)
+
+    def J_times_V_fd(z0_flat, V):
+        h = eps_fd
+        outs = []
+        for j in range(V.shape[1]):
+            v = V[:, j]
+            y1 = decoder_mean(z0_flat + h * v)
+            y2 = decoder_mean(z0_flat - h * v)
+            outs.append(((y1 - y2) / (2 * h)).detach())
+        return torch.stack(outs, dim=1)
+
+    Jdot = (lambda V: J_times_V_jvp(decoder_mean, z_flat, V)) if use_jvp else (lambda V: J_times_V_fd(z_flat, V))
+    JTdot = lambda Y: JT_times_Y_vjp(decoder_mean, z_flat, Y)
+
+    # 1) random subspace in latent space
+    V = torch.randn(d, l, device=device)
+    V, _ = torch.linalg.qr(V, mode='reduced')
+
+    # 2) optional power iterations on (J^T J)
+    for _ in range(max(0, int(power))):
+        Y = Jdot(V)          # (M, l)
+        G = JTdot(Y)         # (d, l)
+        V, _ = torch.linalg.qr(G, mode='reduced')
+
+    # 3) image-space basis
+    Y = Jdot(V)              # (M, l)
+    Q, _ = torch.linalg.qr(Y, mode='reduced')  # (M, l)
+
+    # 4) small d x l matrix and SVD there
+    T = JTdot(Q)             # (d, l)
+    svals = torch.linalg.svdvals(T).clamp_min(1e-12)  # (l,)
+    svals, _ = torch.sort(svals, descending=True)
     return svals[:k]
 
+# ----------------------------
+# Jacobian / log-volume helpers
+# ----------------------------
 def compute_log_volume_per_sample_decoder(
     decoder: nn.Module,
     z_tensor: torch.Tensor,
     device: torch.device,
     max_samples: Optional[int] = None,
-    k: int = 8,
+    k: int = 20,
     n_iter: int = 10,
     desc: str = "compute log-vol"
 ):
@@ -221,26 +278,36 @@ def compute_log_volume_per_sample_decoder(
 
     results = []
     for i in tqdm(range(N), desc=desc):
-        z = z_tensor[i:i+1].to(device).detach().clone()
+        z = z_tensor[i:i+1].to(device).detach().clone()  # keep batch dim=1
         z.requires_grad_(True)
 
-        def decode_flat(z_in):
-            out = decoder.decode(z_in)      # (1, Cx, Hx, Wx)
-            return out.view(-1)             # flatten to (M,)
+        # Flattened decoder mean map: R^d -> R^M
+        # Takes a flat latent vector, reshapes to original latent shape, decodes, and flattens output.
+        z_shape = z.shape  # (1, C, H, W) or (1, C)
+        def decoder_mean(z_flat_1d: torch.Tensor) -> torch.Tensor:
+            z_reshaped = z_flat_1d.view(z_shape[1:]).unsqueeze(0)  # restore to (1, C, H, W) or (1, C)
+            out = decoder.decode(z_reshaped)                       # (1, Cx, Hx, Wx)
+            return out.view(-1)                                    # (M,)
 
-        # jacobian: shape (M, 1, in_dim) for single input -> reshape to (M, in_dim)
-        J = jacobian(decode_flat, z)
-        # jacobian returns shape (M, *z.shape) where z.shape=(1,C,H,W) etc -> flatten latent dims to in_dim
-        J = J.reshape(J.shape[0], -1).to(device)
+        z_like = z.view(-1)  # (d,)
 
-        # approximate top-k singular values
-        svals = topk_singular_values_power(J, k=k, n_iter=n_iter)
+        # Approximate top-k singular values of J at this point via randomized SVD (matrix-free)
+        svals = topk_svals_randomized(
+            decoder_mean,
+            z_like,
+            k=k,
+            oversample=30,      # small oversampling for stability
+            power=2,            # one or two power passes sharpen spectrum
+            use_jvp=True,
+            eps_fd=1e-3,
+        ).clamp_min(1e-12)
+
         log_vol = torch.log(svals).sum().item()
         results.append(float(log_vol))
 
         # cleanup
         z.requires_grad_(False)
-        del J, svals
+        del svals
         torch.cuda.empty_cache()
 
     return np.array(results, dtype=np.float32)
@@ -283,8 +350,8 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--max-samples", type=int, default=None, help="Limit number samples per split (for testing)")
-    p.add_argument("--k", type=int, default=8, help="Top-k singular values to use")
-    p.add_argument("--n-iter", type=int, default=10, help="Power iteration rounds")
+    p.add_argument("--k", type=int, default=20, help="Top-k singular values to use")
+    p.add_argument("--n-iter", type=int, default=10, help="Power iteration rounds")  # kept for compatibility; not used here
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
