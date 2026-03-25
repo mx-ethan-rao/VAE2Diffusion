@@ -18,7 +18,7 @@
 
   
 ## Requirements
-Please refer to **README.md** of different model sub-folders.
+Please refer to the environment setting for [diffuser](https://github.com/huggingface/diffusers).
 
 ## Experiments
 Please download all dataset splits and checkpoints [here](). Notably, the default attacker are [SimA](https://arxiv.org/abs/2509.25003)
