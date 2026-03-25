@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-probe_from_logvol.py
-Load saved log-volume arrays, form groups (median split / quartiles / random two-way),
-then run probe_unet for each selected group pair.
+probe_from_logvol_masked.py
+Load saved log-volume arrays, form groups (median / quartiles / random),
+then run probe_unet while masking out low-contribution latent dimensions
+based on per-dimension contributions (from perdim_contribs.npz).
 
 Run:
-  python probe_from_logvol.py --split-file path/to/splits.npz --vae-ckpt path/to/vae_last.pt \
-      --unet-ckpt path/to/unet_last.pt --logvol npz_out.npz
+  python probe_from_logvol_masked.py \
+      --split-file path/to/splits.npz \
+      --vae-ckpt path/to/vae_last.pt \
+      --unet-ckpt path/to/unet_last.pt \
+      --logvol path/to/logvols_xxx_beta_1e_2.npz \
+      --perdim path/to/perdim_contribs.npz \
+      --drop-percent 10 \
+      --grouping median
 """
-import os
-import argparse
-import random
+import os, math, argparse, random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,20 +23,48 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from torchvision.datasets import MNIST, CIFAR10
-from torchvision.utils import make_grid, save_image
 from torchmetrics.classification import BinaryAUROC, BinaryROC
 from typing import List
+from torch.utils.data import Dataset
+from PIL import Image
+import pandas as pd
+
+
+class CelebAKaggle(Dataset):
+    def __init__(self, root, split="train", transform=None):
+        self.root = root
+        self.img_dir = os.path.join(root, "img_align_celeba")
+        self.attr = pd.read_csv(os.path.join(root, "list_attr_celeba.csv"))
+        self.part = pd.read_csv(os.path.join(root, "list_eval_partition.csv"))
+        self.transform = transform
+        split_map = {"train": 0, "valid": 1, "test": 2, "all": None}
+        split_idx = split_map[split]
+        if split_idx is not None:
+            ids = self.part[self.part["partition"] == split_idx]["image_id"]
+            self.attr = self.attr[self.attr["image_id"].isin(ids)]
+        self.files = self.attr["image_id"].tolist()
+        self.attrs = self.attr.drop(columns=["image_id"]).astype("int32").values
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.img_dir, self.files[idx])
+        img = Image.open(img_path).convert("RGB")
+        target = torch.tensor(self.attrs[idx])
+        if self.transform:
+            img = self.transform(img)
+        return img, target
 
 # ----------------------------
-# reuse the VAE/UNet definitions (only the ones necessary)
+# Minimal model definitions
 # ----------------------------
 def make_gn(ch: int, max_groups: int = 32):
-    g = math.gcd(ch, max_groups) if 'math' in globals() else 1
+    g = math.gcd(ch, max_groups)
+    if g <= 0:
+        g = 1
     return nn.GroupNorm(g, ch)
 
-# To avoid repeating entire code, reimplement minimal VAE + UNet matching shapes used in your probe.
-# (Same as compute_logvol script; ensure architecture matches checkpoint)
-import math
 class ResBlockSimple(nn.Module):
     def __init__(self, ch, drop=0.0):
         super().__init__()
@@ -79,7 +112,6 @@ class VAE(nn.Module):
         h = self.dec_in(z)
         return self.dec(h)
 
-# Minimal UNet skeleton (must match saved checkpoint)
 def normalization(ch):
     g = math.gcd(ch, 32)
     if g <= 0:
@@ -102,10 +134,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
 class Downsample(nn.Module):
     def __init__(self, ch, use_conv=True):
         super().__init__()
-        if use_conv:
-            self.op = nn.Conv2d(ch, ch, 3, stride=2, padding=1)
-        else:
-            self.op = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.op = nn.Conv2d(ch, ch, 3, stride=2, padding=1) if use_conv else nn.AvgPool2d(2, 2)
     def forward(self, x):
         return self.op(x)
 
@@ -182,10 +211,10 @@ class UNetCompVis(nn.Module):
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
         self.out = nn.Sequential(normalization(ch), nn.SiLU(), nn.Conv2d(ch, out_ch, 3, padding=1))
     def forward(self, x, t):
-        # timestep embedding (simple sin/cos as in original)
         half = self.model_ch // 2 if self.model_ch >= 2 else 1
-        freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=t.device).float() / half)
-        emb = torch.cat([torch.cos(t.float().unsqueeze(1) * freqs.unsqueeze(0)), torch.sin(t.float().unsqueeze(1) * freqs.unsqueeze(0))], dim=-1)
+        freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=t.device).float() / max(half, 1))
+        emb = torch.cat([torch.cos(t.float().unsqueeze(1) * freqs.unsqueeze(0)),
+                         torch.sin(t.float().unsqueeze(1) * freqs.unsqueeze(0))], dim=-1)
         emb = self.time_embed(emb)
         hs = []
         h = x
@@ -202,9 +231,19 @@ class UNetCompVis(nn.Module):
 # Data helpers (same deterministic order)
 # ----------------------------
 def build_transforms(img_size: int, in_channels: int, dataset_name: str):
-    ops: List[transforms.Transform] = [transforms.Resize((img_size, img_size))]
-    if dataset_name.lower() == "mnist":
-        ops.append(transforms.Grayscale(num_output_channels=in_channels))
+    ds = dataset_name.lower()
+    ops: List[transforms.Transform] = []
+
+    if ds == "mnist":
+        ops += [transforms.Resize((img_size, img_size)),
+                transforms.Grayscale(num_output_channels=in_channels)]
+    elif ds == "celeba":
+        # Option 1 (recommended): center crop around face, then resize to 64
+        ops += [transforms.CenterCrop(140), transforms.Resize((img_size, img_size))]
+    else:
+        # cifar10 (already 32x32 but keep for flexibility)
+        ops += [transforms.Resize((img_size, img_size))]
+
     ops += [
         transforms.ToTensor(),
         transforms.Normalize([0.5] * in_channels, [0.5] * in_channels),
@@ -219,35 +258,143 @@ def build_dataloaders(dataset: str, root: str, split_file: str, img_size: int, i
         full_train = CIFAR10(root=root, train=True, download=True, transform=transform)
     elif ds_name == "mnist":
         full_train = MNIST(root=root, train=True, download=True, transform=transform)
+    elif ds_name == "celeba":
+        full_train = CelebAKaggle(root=root, split="train", transform=transform)
     else:
         raise ValueError(f"Unsupported dataset: {dataset}. Use 'cifar10' or 'mnist'.")
-
     split = np.load(split_file)
     mia_train_idxs = split["mia_train_idxs"]
     mia_val_idxs = split["mia_eval_idxs"]
-
     train_dataset = Subset(full_train, mia_train_idxs)
     val_dataset = Subset(full_train, mia_val_idxs)
-
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     return train_loader, val_loader
 
+@torch.no_grad()
+def get_latents_vae(vae: VAE, x: torch.Tensor):
+    mu, _ = vae.encode(x)
+    return mu
+
+def build_subset_loader_from_mask(orig_loader, mask, batch_size=128):
+    orig_subset = orig_loader.dataset
+    if not isinstance(orig_subset, Subset):
+        raise RuntimeError("Expected Subset for orig_loader.dataset")
+    base_indices = np.array(orig_subset.indices)
+    chosen_indices = base_indices[mask]
+    new_subset = Subset(orig_subset.dataset, chosen_indices.tolist())
+    return DataLoader(new_subset, batch_size=batch_size, shuffle=False, num_workers=orig_loader.num_workers, pin_memory=True)
+
 # ----------------------------
-# Probe code (same as original)
+# Probe function with per-dim masking
 # ----------------------------
-def probe_unet(unet: UNetCompVis, lat_fn, train_loader, val_loader, device, probe_min_t=0, probe_max_t=300, probe_step=10):
+def probe_unet_masked(unet: UNetCompVis,
+                      lat_fn,
+                      train_loader,
+                      val_loader,
+                      contrib_train: np.ndarray,
+                      contrib_val: np.ndarray,
+                      device,
+                      drop_percent: float = 10.0,
+                      probe_min_t=0,
+                      probe_max_t=300,
+                      probe_step=10,
+                      random_drop: bool = False):
+    """
+    Same probing as original, but the attack statistic sums over only the top (100 - drop_percent)%
+    per-dimension contributions per-sample, using masks derived from contrib_* arrays.
+    """
     unet.eval()
+    print(f"drop_percent={drop_percent}")
+
+    if random_drop:
+        # --- random baseline: random drop same percentage ---
+        mask_train = np.ones_like(contrib_train, dtype=np.float32)
+        num_drop = int(mask_train.shape[1] * drop_percent / 100.0)
+        for i in range(mask_train.shape[0]):
+            drop_idx = np.random.choice(mask_train.shape[1], num_drop, replace=False)
+            mask_train[i, drop_idx] = 0.0
+
+        mask_val = np.ones_like(contrib_val, dtype=np.float32)
+        num_drop = int(mask_val.shape[1] * drop_percent / 100.0)
+        for i in range(mask_val.shape[0]):
+            drop_idx = np.random.choice(mask_val.shape[1], num_drop, replace=False)
+            mask_val[i, drop_idx] = 0.0
+    else:
+        if drop_percent > 0.0:
+            # percentile per row -> threshold shape (B, 1)
+            thr = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
+            mask_train = (contrib_train > thr).astype(np.float32)  # keep=1, drop=0
+            thr = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
+            mask_val = (contrib_val > thr).astype(np.float32)  # keep=1, drop=0
+
+        else:
+            mask_train = np.ones_like(contrib_train, dtype=np.float32)
+            mask_val = np.ones_like(contrib_val, dtype=np.float32)
+
+    # # Flatten per-dim contributions to match pred.flatten(1) ordering
+    # contrib_train = contrib_train.reshape(contrib_train.shape[0], -1)
+    # contrib_val   = contrib_val.reshape(contrib_val.shape[0], -1)
+
+    # contrib_train = contrib_train - contrib_train.min(axis=1, keepdims=True)
+    # contrib_val   = contrib_val   - contrib_val.min(axis=1, keepdims=True)
+    # Per-sample percentile thresholds; drop the lowest 'drop_percent' percent of dims
+    # thr_train = np.percentile(contrib_train, drop_percent, axis=1, keepdims=True)
+    # thr_val   = np.percentile(contrib_val, drop_percent, axis=1, keepdims=True)
+
+    # mask_train = (contrib_train > thr_train)  # True for kept dims
+    # mask_val   = (contrib_val > thr_val)
+    # contrib_train[~mask_train] = 0.0
+    # contrib_val[~mask_val] = 0.0
+    # mask_train = contrib_train
+    # mask_val = contrib_val
+
+    # Softmax weighting with temperature
+    # temperature = 1.0  # e.g. 0.5 or 1.0
+
+    # # Stable exponentiation: subtract per-sample max
+    # exp_train = np.exp((contrib_train) / temperature)
+    # exp_val   = np.exp((contrib_val) / temperature)
+
+    # # Normalize so weights sum to 1 per sample
+    # w_train = exp_train / (exp_train.sum(axis=1, keepdims=True) + 1e-12)
+    # w_val   = exp_val   / (exp_val.sum(axis=1, keepdims=True) + 1e-12)
+
+    # # # Optional: drop the lowest X% weights (keep high contributors)
+    # # thr_train = np.percentile(w_train, drop_percent, axis=1, keepdims=True)
+    # # thr_val   = np.percentile(w_val,   drop_percent, axis=1, keepdims=True)
+    # # w_train = np.where(w_train > thr_train, w_train, 0.0)
+    # # w_val   = np.where(w_val   > thr_val,   w_val,   0.0)
+
+    # # Renormalize after masking
+    # mask_train = w_train / (w_train.sum(axis=1, keepdims=True) + 1e-12)
+    # mask_val   = w_val   / (w_val.sum(axis=1, keepdims=True) + 1e-12)
+
+
+
+
+
+
+    # Collect latents deterministically to align with contrib arrays
     Zm_list, Zn_list = [], []
-    for (m, _), (n, _) in zip(train_loader, val_loader):
+    for m, _ in train_loader:
         m = m.to(device)
-        n = n.to(device)
         with torch.no_grad():
             Zm_list.append(lat_fn(m))
-            Zn_list.append(lat_fn(n))
     Zm = torch.cat(Zm_list, dim=0)
+
+
+    for (n, _) in val_loader:
+        n = n.to(device)
+        with torch.no_grad():
+            Zn_list.append(lat_fn(n))
     Zn = torch.cat(Zn_list, dim=0)
 
+    # Move masks to device
+    mask_m = torch.from_numpy(mask_train).to(device).float()
+    mask_n = torch.from_numpy(mask_val).to(device).float()
+
+    # Metrics
     probe_ts = list(range(probe_min_t, probe_max_t, probe_step))
     auc_mtr, roc_mtr = BinaryAUROC().to(device), BinaryROC().to(device)
     auroc_k, tpr1_k, asr_k = [], [], []
@@ -258,12 +405,21 @@ def probe_unet(unet: UNetCompVis, lat_fn, train_loader, val_loader, device, prob
         with torch.no_grad():
             pred_m = unet(Zm, t_m)
             pred_n = unet(Zn, t_n)
-        sm = (pred_m.abs() ** 4).flatten(1).sum(dim=-1)
-        sn = (pred_n.abs() ** 4).flatten(1).sum(dim=-1)
+
+        # Apply per-dimension masks before summing
+        pred_m_f = pred_m.flatten(1)
+        pred_n_f = pred_n.flatten(1)
+        sm = ((pred_m_f.abs() ** 4) * mask_m).sum(dim=-1)
+        sn = ((pred_n_f.abs() ** 4) * mask_n).sum(dim=-1)
+
+        # Normalize
         scale = torch.max(sm.max(), sn.max()).clamp(min=1e-12)
         sm, sn = sm / scale, sn / scale
+
         scores = torch.cat([sm, sn])
         labels = torch.cat([torch.zeros_like(sm), torch.ones_like(sn)]).long()
+        # scores = torch.cat([1 - sm, 1 - sn])
+        # labels = torch.cat([torch.ones_like(sm), torch.zeros_like(sn)]).long()
 
         auroc = auc_mtr(scores, labels).item()
         fpr, tpr, _ = roc_mtr(scores, labels)
@@ -286,33 +442,22 @@ def probe_unet(unet: UNetCompVis, lat_fn, train_loader, val_loader, device, prob
     print(f"  TPR@1% = {max(tpr1_k):.4f}")
 
 # ----------------------------
-# Helpers to get latents
-# ----------------------------
-@torch.no_grad()
-def get_latents_vae(vae: VAE, x: torch.Tensor):
-    mu, _ = vae.encode(x)
-    return mu
-
-def build_subset_loader_from_mask(orig_loader, mask, batch_size=128):
-    orig_subset = orig_loader.dataset
-    if not isinstance(orig_subset, Subset):
-        raise RuntimeError("Expected Subset for orig_loader.dataset")
-    base_indices = np.array(orig_subset.indices)
-    chosen_indices = base_indices[mask]
-    new_subset = Subset(orig_subset.dataset, chosen_indices.tolist())
-    return DataLoader(new_subset, batch_size=batch_size, shuffle=False, num_workers=orig_loader.num_workers, pin_memory=True)
-
-# ----------------------------
 # CLI
 # ----------------------------
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10", "mnist"])
-    p.add_argument("--dataset-root", type=str, default="/home/ethanrao/MIA_LDM/data")
+    p.add_argument("--dataset", type=str, default="cifar10", choices=["cifar10", "mnist", "celeba"])
+    p.add_argument("--dataset-root", type=str, default="/home/ethanrao/MIA_LDM/VAE2Diffusion/data")
     p.add_argument("--split-file", type=str, default="/banana/ethan/MIA_data/CIFAR10/CIFAR10_train_ratio0.5.npz", required=False)
     p.add_argument("--vae-ckpt", type=str, default="/banana/ethan/MIA_LDM_data/KL_sweep/1e_2/vae/vae_last.pt", required=False)
     p.add_argument("--unet-ckpt", type=str, default="/banana/ethan/MIA_LDM_data/KL_sweep/1e_2/ldm_vae/unet_last.pt", required=False)
-    p.add_argument("--logvol", type=str, default="/home/ethanrao/MIA_LDM/data/logvols_cifar10_beta_1e_2.npz", required=False, help=".npz produced by compute_logvol.py")
+    p.add_argument("--logvol", type=str, default="/home/ethanrao/MIA_LDM/data/logvols_cifar10_beta_1e_2.npz", required=False,
+                   help=".npz produced by compute_logvol.py")
+    p.add_argument("--perdim", type=str, required=True, help="Path to perdim_contribs.npz")
+    p.add_argument("--drop-percent", type=float, default=40.0,
+                   help="Percent of lowest per-dim contributions to drop per sample (0–100).")
+    p.add_argument('--random_drop', action='store_true',
+                        help='if set, randomly drop drop_percent%% of dimensions as a baseline')
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--img-size", type=int, default=32)
     p.add_argument("--in-channels", type=int, default=3)
@@ -325,7 +470,15 @@ def parse_args():
     p.add_argument("--probe-step", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--grouping", type=str, default="median",
-                   choices=["median", "quartiles", "random_split"], help="Grouping strategy")
+                   choices=["median", "quartiles", "random"], help="Grouping strategy")
+    p.add_argument("--random_groups", type=int, default=2)
+
+    # UNet arch
+    p.add_argument("--unet_model_ch", type=int, default=128)
+    p.add_argument("--unet_channel_mult", type=int, nargs="+", default=[1, 2, 2, 2])
+    p.add_argument("--unet_num_res_blocks", type=int, default=2)
+    p.add_argument("--no_conv_resample", action="store_true", help="Disable conv resampling in UNet up/down")
+    
     return p.parse_args()
 
 def main():
@@ -336,7 +489,7 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    # build deterministic loaders (shuffle=False) to align indices with saved logvols
+    # build deterministic loaders (shuffle=False) to align indices with saved arrays
     train_loader, val_loader = build_dataloaders(
         dataset=args.dataset,
         root=args.dataset_root,
@@ -349,13 +502,21 @@ def main():
     )
     print(f"Train size: {len(train_loader.dataset)} | Val size: {len(val_loader.dataset)}")
 
-    # load logvol file
+    # load scalar logvol arrays for grouping (unchanged logic)
     data = np.load(args.logvol)
     logv_train = data["logv_train"]
     logv_val = data["logv_val"]
-    train_indices = data["train_indices"]
-    val_indices = data["val_indices"]
+    train_indices = data["train_indices"] if "train_indices" in data.files else None
+    val_indices = data["val_indices"] if "val_indices" in data.files else None
     print(f"Loaded logvols: train:{logv_train.shape} val:{logv_val.shape}")
+
+    # load per-dimension contributions (coordinate-basis)
+    perdim = np.load(args.perdim)
+    contrib_train = perdim["per_dim_logcontrib_train"]
+    contrib_val = perdim["per_dim_logcontrib_val"]
+    # basic sanity check on lengths
+    if contrib_train.shape[0] != logv_train.shape[0] or contrib_val.shape[0] != logv_val.shape[0]:
+        raise RuntimeError("perdim_contribs and logvol shapes do not align with train/val counts.")
 
     # load models
     vae = VAE(in_ch=args.in_channels, latent_ch=args.latent_channels, base=args.ae_base).to(device)
@@ -363,13 +524,13 @@ def main():
     vae.eval()
     print("Loaded VAE ckpt")
 
-    unet = UNetCompVis(in_ch=args.latent_channels, model_ch=128, out_ch=args.latent_channels,
-                       channel_mult=(1,2,2,2), num_res_blocks=2, dropout=0.1, conv_resample=True).to(device)
+    unet = UNetCompVis(in_ch=args.latent_channels, model_ch=args.unet_model_ch, out_ch=args.latent_channels,
+                       channel_mult=args.unet_channel_mult, num_res_blocks=args.unet_num_res_blocks, dropout=0.1, conv_resample=True).to(device)
     unet.load_state_dict(torch.load(args.unet_ckpt, map_location=device))
     unet.eval()
     print("Loaded UNet ckpt")
 
-    # grouping
+    # ---- grouping (identical to original) ----
     if args.grouping == "median":
         all_logv = np.concatenate([logv_train, logv_val], axis=0)
         thr = np.median(all_logv)
@@ -398,39 +559,103 @@ def main():
         ]
         print(f"Quartiles: {q25:.6f}, {q50:.6f}, {q75:.6f}")
 
-    elif args.grouping == "random_split":
-        # random two-way partition for both member and held-out sets (reproducible)
+    elif args.grouping == "random":
         rng = np.random.RandomState(args.seed)
         Ntr = logv_train.shape[0]
         Nval = logv_val.shape[0]
+
+        # Generate random permutations
         perm_tr = rng.permutation(Ntr)
         perm_val = rng.permutation(Nval)
-        half_tr = Ntr // 2
-        half_val = Nval // 2
-        train_mask_r1 = np.zeros(Ntr, dtype=bool); train_mask_r1[perm_tr[:half_tr]] = True
-        train_mask_r2 = ~train_mask_r1
-        val_mask_r1 = np.zeros(Nval, dtype=bool); val_mask_r1[perm_val[:half_val]] = True
-        val_mask_r2 = ~val_mask_r1
+
+        # Determine how many groups to create
+        n_groups = args.random_groups
+
+        # Compute roughly equal group sizes
+        sizes_tr = np.full(n_groups, Ntr // n_groups, dtype=int)
+        sizes_tr[: Ntr % n_groups] += 1  # distribute remainder
+        sizes_val = np.full(n_groups, Nval // n_groups, dtype=int)
+        sizes_val[: Nval % n_groups] += 1
+
+        # Split indices accordingly
+        train_masks = []
+        val_masks = []
+        start_tr = start_val = 0
+        for i in range(n_groups):
+            end_tr = start_tr + sizes_tr[i]
+            end_val = start_val + sizes_val[i]
+
+            mask_tr = np.zeros(Ntr, dtype=bool)
+            mask_tr[perm_tr[start_tr:end_tr]] = True
+
+            mask_val = np.zeros(Nval, dtype=bool)
+            mask_val[perm_val[start_val:end_val]] = True
+
+            train_masks.append(mask_tr)
+            val_masks.append(mask_val)
+
+            start_tr, start_val = end_tr, end_val
+
+        # Pack into groups list
         groups = [
-            ("random1", train_mask_r1, val_mask_r1),
-            ("random2", train_mask_r2, val_mask_r2),
+            (f"random{i+1}", train_masks[i], val_masks[i])
+            for i in range(n_groups)
         ]
-        print("Random split created")
+
+        print(f"Random split created with {n_groups} groups")
+
+        # rng = np.random.RandomState(args.seed)
+        # Ntr = logv_train.shape[0]
+        # Nval = logv_val.shape[0]
+        # perm_tr = rng.permutation(Ntr)
+        # perm_val = rng.permutation(Nval)
+        # half_tr = Ntr // 2
+        # half_val = Nval // 2
+        # train_mask_r1 = np.zeros(Ntr, dtype=bool); train_mask_r1[perm_tr[:half_tr]] = True
+        # train_mask_r2 = ~train_mask_r1
+        # val_mask_r1 = np.zeros(Nval, dtype=bool); val_mask_r1[perm_val[:half_val]] = True
+        # val_mask_r2 = ~val_mask_r1
+        # groups = [
+        #     ("random1", train_mask_r1, val_mask_r1),
+        #     ("random2", train_mask_r2, val_mask_r2),
+        # ]
+        # print("Random split created")
 
     else:
         raise ValueError("Unknown grouping")
 
-    # run probes per group
+    # ---- run probes per group (attack uses masked per-dim contributions) ----
     for name, tr_mask, va_mask in groups:
         print(f"\n--- Probing group: {name} ---")
         print(f"Member count: {int(tr_mask.sum())} | Heldout count: {int(va_mask.sum())}")
         if tr_mask.sum() == 0 or va_mask.sum() == 0:
             print("Skipping empty group")
             continue
+
+        # subset loaders based on grouping masks (unchanged)
         tr_loader = build_subset_loader_from_mask(train_loader, tr_mask, batch_size=args.batch_size)
         va_loader = build_subset_loader_from_mask(val_loader, va_mask, batch_size=args.batch_size)
-        probe_unet(unet, lambda x: get_latents_vae(vae, x), tr_loader, va_loader, device,
-                   probe_min_t=args.probe_min_t, probe_max_t=args.probe_max_t, probe_step=args.probe_step)
+
+        # slice per-dim contrib arrays to the same subset **order as the loaders**.
+        # Since loaders iterate datasets in index order (shuffle=False), and contrib_* rows
+        # are aligned with those same indices, we can directly mask them here:
+        contrib_train_group = contrib_train[tr_mask]
+        contrib_val_group = contrib_val[va_mask]
+
+        probe_unet_masked(
+            unet,
+            lambda x: get_latents_vae(vae, x),
+            tr_loader,
+            va_loader,
+            contrib_train_group,
+            contrib_val_group,
+            device,
+            drop_percent=args.drop_percent,
+            probe_min_t=args.probe_min_t,
+            probe_max_t=args.probe_max_t,
+            probe_step=args.probe_step,
+            random_drop=args.random_drop,
+        )
 
     print("All probes done.")
 
