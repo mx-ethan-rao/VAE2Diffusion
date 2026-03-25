@@ -1,4 +1,4 @@
-python cal_log_volume.py \
+python cal_pullback.py \
   --dataset mnist \
   --split-file /home/ethanrao/MIA_LDM/data/mnist_mia_split.npz \
   --vae-ckpt /data/mingxing/tmp/MNIST/KL_sweep/1e_2/vae/vae_last.pt \
@@ -9,7 +9,7 @@ python cal_log_volume.py \
   --k 50 \
   --n-iter 30
 
-python cal_log_volume.py \
+python cal_pullback.py \
   --split-file  /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/CIFAR10_train_ratio0.5.npz \
   --vae-ckpt /data/mingxing/tmp/CIFAR10/KL_sweep/1e_2/vae/vae_last.pt \
   --dataset-root /home/ethanrao/MIA_LDM/data \
@@ -50,7 +50,7 @@ python attack_per_dim.py \
   --grouping random
 
 ###################celeba########################
-python cal_log_volume.py \
+python cal_pullback.py \
   --dataset celeba \
   --split-file  /data/mingxing/tmp/CELEBA/KL_sweep/1e_3/CELEBA_train_ratio0.5.npz \
   --vae-ckpt /data/mingxing/tmp/CELEBA/KL_sweep/1e_3/vae/vae_last.pt \
