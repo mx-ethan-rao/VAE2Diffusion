@@ -154,11 +154,12 @@ python -m src.mia.attack_per_dim --attacker SimA --dataset pokemon --ckpt-path /
 ## BibTeX
 
 ```
-@article{rao2025latent,
-  title={Latent Diffusion Inversion Requires Understanding the Latent Space},
+@inproceedings{rao2026latent,
+  title={Latent diffusion inversion requires understanding the latent space},
   author={Rao, Mingxing and Qu, Bowen and Moyer, Daniel},
-  journal={arXiv preprint arXiv:2511.20592},
-  year={2025}
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  pages={34971--34980},
+  year={2026}
 }
 ```
 
