@@ -21,7 +21,7 @@
 Please refer to the environment setting for [diffuser](https://github.com/huggingface/diffusers).
 
 ## Experiments
-Please download all dataset splits and checkpoints [here](). Notably, the default attacker are [SimA](https://arxiv.org/abs/2509.25003)
+Please download all dataset splits and checkpoints [here](https://drive.google.com/drive/folders/1GxbERUOZZgG_118GcCCAFbVmKmE_D5hL?usp=sharing). Notably, the default attacker are [SimA](https://arxiv.org/abs/2509.25003)
 
 ### <a id="ldm-light"></a>MNIST, CIFAR-10, CelebA
 #### Working dir
@@ -40,10 +40,10 @@ python main.py --dataset celeba --dataset_root /path/to/celeba --split_file /pat
 #### Computing the pullback metric for each data
 ```
 # mnist and cifar-10
-python cal_pullback.py --dataset cifar10 --split-file /path/to/splits/CIFAR10_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --dataset-root /path/to/data --out /path/to/output/logvols_cifar10_beta_1e_2.npz --device cuda --batch-size 32 --k 50 --n-iter 30
+python cal_pullback.py --dataset cifar10 --split-file /path/to/splits/CIFAR10_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --dataset-root /path/to/data --out /path/to/output/pullback_cifar10_beta_1e_2.npz --device cuda --batch-size 32 --k 50 --n-iter 30
 
 # celeba
-python cal_pullback.py --dataset celeba --split-file /path/to/splits/CELEBA_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --dataset-root /path/to/celeba_data --out /path/to/output/logvols_celeba_beta_1e_3.npz --device cuda --batch-size 32 --k 50 --n-iter 30 --img-size 64
+python cal_pullback.py --dataset celeba --split-file /path/to/splits/CELEBA_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --dataset-root /path/to/celeba_data --out /path/to/output/pullback_celeba_beta_1e_3.npz --device cuda --batch-size 32 --k 50 --n-iter 30 --img-size 64
 ```
 
 #### Computing the per-dimensional contribution to distortion
@@ -58,19 +58,19 @@ python cal_per_dim_contri.py --dataset celeba --split-file /path/to/splits/CELEB
 #### MIA for different distortion quartiles
 ```
 # mnist and cifar-10
-python attack.py --split-file /path/to/splits/CIFAR10_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --unet-ckpt /path/to/ldm_vae/unet_last.pt --logvol /path/to/results/logvols_cifar10_beta_1e_2.npz --device cuda --grouping median --batch-size 64
+python attack.py --split-file /path/to/splits/CIFAR10_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --unet-ckpt /path/to/ldm_vae/unet_last.pt --logvol /path/to/results/pullback_cifar10_beta_1e_2.npz --device cuda --grouping median --batch-size 64
 
 # celeba
-python attack_per_dim_stream.py --dataset celeba --dataset-root /path/to/celeba_data --split-file /path/to/splits/CELEBA_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --unet-ckpt /path/to/ldm_vae/unet_last.pt --logvol /path/to/results/logvols_celeba_beta_1e_3.npz --perdim /path/to/results/per_dim_celeba_beta_1e_3.npz --img-size 64 --unet_model_ch 224 --unet_channel_mult 1 2 3 4 --device cuda --grouping quartiles --drop-percent 0.0
+python attack_per_dim_stream.py --dataset celeba --dataset-root /path/to/celeba_data --split-file /path/to/splits/CELEBA_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --unet-ckpt /path/to/ldm_vae/unet_last.pt --logvol /path/to/results/pullback_celeba_beta_1e_3.npz --perdim /path/to/results/per_dim_celeba_beta_1e_3.npz --img-size 64 --unet_model_ch 224 --unet_channel_mult 1 2 3 4 --device cuda --grouping quartiles --drop-percent 0.0
 ```
 
 #### Removing 40% less-memorizing dimensions (the ratio is adjustable)
 ```
 # mnist and cifar-10
-python attack_per_dim.py --dataset cifar10 --dataset-root /path/to/datasets --split-file /path/to/splits/CIFAR10_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --unet-ckpt /path/to/ldm_vae/unet_last.pt --logvol /path/to/results/logvols_cifar10_beta_1e_2.npz --perdim /path/to/results/per_dim_cifar10_beta_1e_2.npz --device cuda --grouping random --random_groups 1 --drop-percent 40.0
+python attack_per_dim.py --dataset cifar10 --dataset-root /path/to/datasets --split-file /path/to/splits/CIFAR10_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --unet-ckpt /path/to/ldm_vae/unet_last.pt --logvol /path/to/results/pullback_cifar10_beta_1e_2.npz --perdim /path/to/results/per_dim_cifar10_beta_1e_2.npz --device cuda --grouping random --random_groups 1 --drop-percent 40.0
 
 # celeba
-python attack_per_dim_stream.py --dataset celeba --dataset-root /path/to/celeba_data --split-file /path/to/splits/CELEBA_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --unet-ckpt /path/to/ldm_vae/unet_last.pt --logvol /path/to/results/logvols_celeba_beta_1e_3.npz --perdim /path/to/results/per_dim_celeba_beta_1e_3.npz --img-size 64 --unet_model_ch 224 --unet_channel_mult 1 2 3 4 --device cuda --grouping random --random_groups 1 --drop-percent 40.0
+python attack_per_dim_stream.py --dataset celeba --dataset-root /path/to/celeba_data --split-file /path/to/splits/CELEBA_train_ratio0.5.npz --vae-ckpt /path/to/vae/vae_last.pt --unet-ckpt /path/to/ldm_vae/unet_last.pt --logvol /path/to/results/pullback_celeba_beta_1e_3.npz --perdim /path/to/results/per_dim_celeba_beta_1e_3.npz --img-size 64 --unet_model_ch 224 --unet_channel_mult 1 2 3 4 --device cuda --grouping random --random_groups 1 --drop-percent 40.0
 ```
 
 
@@ -86,27 +86,27 @@ cd ldm4imagenet
 ```
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
 NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN \
-accelerate launch --multi_gpu main.py --data_root /path/to/imagenet100k --out_dir /path/to/output_dir --amp --per_device_batch 21 --unet_epochs 600
+accelerate launch --multi_gpu main.py --data_root /path/to/tinyimagenet --out_dir /path/to/output_dir --amp --per_device_batch 21 --unet_epochs 600
 ```
 
 #### Computing the pullback metric for each data
 ```
-python cal_pullback.py --data_root /path/to/imagenet100k --out_dir /path/to/output_dir --out_npz /path/to/output_dir/imnetv1_10k_pullback.npz --method fd
+python cal_pullback.py --data_root /path/to/tinyimagenet --out_dir /path/to/output_dir --out_npz /path/to/output_dir/imnetv1_10k_pullback.npz --method fd
 ```
 
 #### Computing the per-dimensional contribution to distortion
 ```
-python cal_per_dim_contri.py --data_root /path/to/imagenet100k --out_dir /path/to/output_dir --pullback_npz /path/to/output_dir/imnetv1_10k_pullback.npz --out_npz /path/to/output_dir/imnetv1_10k_per_dim.npz
+python cal_per_dim_contri.py --data_root /path/to/tinyimagenet --out_dir /path/to/output_dir --pullback_npz /path/to/output_dir/imnetv1_10k_pullback.npz --out_npz /path/to/output_dir/imnetv1_10k_per_dim.npz
 ```
 
 #### MIA for different distortion quartiles
 ```
-python attack_by_group_advance.py --data_root /path/to/imagenet100k --out_dir /path/to/output_dir --pullback_npz /path/to/output_dir/imnetv1_10k_pullback.npz
+python attack_by_group_advance.py --data_root /path/to/tinyimagenet --out_dir /path/to/output_dir --pullback_npz /path/to/output_dir/imnetv1_10k_pullback.npz
 ```
 
 #### Removing 40% less-memorizing dimensions (the ratio is adjustable)
 ```
-python attack_per_dim.py --data_root /path/to/imagenet100k/data --out_dir /path/to/output_dir --pullback_npz /path/to/output_dir/imnetv1_10k_pullback.npz --perdim_npz /path/to/output_dir/imnetv1_10k_per_dim.npz --grouping random --random_groups 1 --drop_percent 40.0
+python attack_per_dim.py --data_root /path/to/tinyimagenet/data --out_dir /path/to/output_dir --pullback_npz /path/to/output_dir/imnetv1_10k_pullback.npz --perdim_npz /path/to/output_dir/imnetv1_10k_per_dim.npz --grouping random --random_groups 1 --drop_percent 40.0
 ```
 
 ### <a id="diffusers"></a>Pokemon, MS-COCO, and Flickr
@@ -149,6 +149,12 @@ python -m src.mia.attack_by_group.py --dataset pokemon --ckpt-path /path/to/POKE
 python -m src.mia.attack_per_dim --attacker SimA --dataset pokemon --ckpt-path /path/to/checkpoint/sd-pokemon-model --perdim_npz /path/to/results/per_dim_pokemon_diffuser.npz --drop_percent 40.0
 ```
 
+
+
+## Remarks
+### With all checkpoints and data splits([here](https://drive.google.com/drive/folders/1GxbERUOZZgG_118GcCCAFbVmKmE_D5hL?usp=sharing)), you should be able to reproduce all the results reported in the paper. 
+
+### Please email Mingxing ([mingxing.rao@vanderbilt.edu](mailto:mingxing.rao@vanderbilt.edu)) if you have additional questions for reproduction.
 
 
 ## BibTeX
